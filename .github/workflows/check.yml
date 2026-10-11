@@ -11,7 +11,8 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Linux sunucuda Akamai 403 verdi; Windows'ta gerçek Chrome + masaüstü ile deniyoruz
+    runs-on: windows-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -23,15 +24,12 @@ jobs:
           cache-dependency-path: checker/requirements.txt
 
       - name: Bağımlılıklar
-        run: |
-          pip install -r checker/requirements.txt
-          which xvfb-run || (sudo apt-get update && sudo apt-get install -y xvfb)
-          google-chrome --version
+        run: pip install -r checker/requirements.txt
 
       - name: Fiyatları kontrol et
         working-directory: checker
         env:
           WORKER_URL: ${{ secrets.WORKER_URL }}
           API_SECRET: ${{ secrets.API_SECRET }}
-        # Akamai headless tarayıcıyı engelliyor; sanal ekranda gerçek Chrome açıyoruz
-        run: xvfb-run -a --server-args="-screen 0 1366x900x24" python check.py
+          PYTHONIOENCODING: utf-8
+        run: python check.py
