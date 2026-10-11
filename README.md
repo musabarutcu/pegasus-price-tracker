@@ -5,7 +5,8 @@ Telegram botuna rota ve tarih aralığı yazıyorsun, bot ilk fiyatları hemen g
 ```
 /takip istanbul izmir 20.11 25.11        → fiyat her değiştiğinde bildir
 /takip izmir istanbul 23.11 1400         → sadece 1.400 TL ve altına inince bildir
-/liste   /sil 2   /kontrol   /yardim
+/takip istanbul izmir 20.11 saat 08-12   → sadece 08:00-12:00 arası kalkışlar
+/liste   /iptal 2   /kontrol   /yardim
 ```
 
 ## Nasıl çalışıyor?
@@ -73,21 +74,77 @@ Depo → **Settings** → **Secrets and variables** → **Actions** → **New re
 
 ---
 
-## Kullanım
+## Kullanım Kılavuzu
+
+Aynı kılavuz botta da var: bota **`/yardim`** yaz.
+
+### 1. Takip başlat
+```
+/takip istanbul izmir 20.11 25.11
+```
+20-25 Kasım arası her günün en ucuz uçuşunu takip eder. İlk fiyat listesi 1-2 dakikada gelir, sonra fiyat **her değiştiğinde** bildirim gelir.
+
+Tek gün için tek tarih yaz: `/takip izmir istanbul 23.11`
+
+### 2. Hedef fiyat
+Sona bir sayı ekle:
+```
+/takip istanbul izmir 20.11 25.11 1400
+```
+Sadece fiyat **1.400 TL veya altına** inince bildirim gelir (altındayken daha da düşerse yine haber verir).
+
+### 3. Saat aralığı
+Sadece belli saatler arasında **kalkan** uçuşlara bakmak için:
+```
+/takip istanbul izmir 20.11 25.11 saat 08-12
+```
+
+| Yazım | Anlamı |
+|---|---|
+| `saat 08-12` veya `08-12` | 08:00 - 12:00 arası kalkışlar |
+| `08:30-11:00` | 08:30 - 11:00 arası |
+| `saat 18 23` | 18:00 - 23:00 arası |
+| `22-02` | gece yarısını aşan aralık: 22:00 - 02:00 |
+| `sabah` | 06:00 - 12:00 |
+| `öğle` | 12:00 - 17:00 |
+| `akşam` | 17:00 - 24:00 |
+| `gece` | 00:00 - 06:00 |
+
+Hepsi bir arada: `/takip istanbul izmir 20.11 25.11 akşam 1500`
+
+O gün seçilen saatlerde uçuş yoksa listede "bu saatlerde satışta uçuş yok" yazar.
+
+### 4. Takiplerini gör
+```
+/liste
+```
+Aktif takiplerini numaralı olarak, şu anki en ucuz fiyatlarıyla gösterir. Her takibin altında **❌ iptal butonu** vardır.
+
+### 5. Takip iptal et / çıkar
+
+| Yazım | Ne yapar |
+|---|---|
+| `/iptal` | Takiplerini butonlarla listeler, ❌'ye basınca o takip çıkar |
+| `/iptal 2` | 2 numaralı takibi çıkarır (numaralar `/liste`'de) |
+| `/iptal 1 3` | Birden fazla takibi çıkarır |
+| `/iptal hepsi` | Tüm takipleri çıkarır |
+| `çıkar 2`, `sil 2`, `iptal 2` | Komutsuz yazım da olur |
+
+Listede **🗑 Hepsini iptal et** butonu da var (yanlışlıkla basmaya karşı onay sorar).
+
+### 6. Diğer komutlar
 
 | Komut | Ne yapar |
 |---|---|
-| `/takip istanbul izmir 20.11 25.11` | 20-25 Kasım arası her gün için en ucuz fiyatı takip eder, değişince bildirir |
-| `/takip izmir istanbul 23.11` | Tek gün |
-| `/takip istanbul izmir 20.11 25.11 1400` | Sadece fiyat **1.400 TL veya altına** inince bildirir |
-| `/liste` | Takiplerin ve şu anki en ucuz fiyatlar |
-| `/sil 2` / `/sil hepsi` | Takip siler |
-| `/kontrol` | Beklemeden hemen kontrol et |
+| `/kontrol` | 30 dakikayı beklemeden şimdi kontrol et |
+| `/yardim` | Kullanım kılavuzu |
+| `/kod KOD` | Erişim kodu (arkadaşların ilk mesajda bunu yazar) |
 
+### Bilmen gerekenler
 - **İstanbul** = Sabiha Gökçen + İstanbul Havalimanı (ikisinin en ucuzu). Sadece biri için `saw` ya da `ist` yaz.
-- Diğer şehirler: ankara, antalya, trabzon, bodrum, dalaman... ya da havalimanı kodu (ESB, AYT, TZX...).
+- Diğer şehirler: ankara, antalya, trabzon, bodrum, dalaman, kayseri... ya da havalimanı kodu (ESB, AYT, TZX...).
 - Tarih biçimleri: `20.11`, `20.11.2026`, `2026-11-20`. Komutsuz `istanbul izmir 20.11 25.11` yazmak da olur.
-- Kişi başı en fazla 10 takip, her takip en fazla 31 gün. Tarihi geçen takipler otomatik silinir.
+- Kişi başı en fazla 10 takip, her takip en fazla 31 gün. Tarihi geçen takipler kendiliğinden biter (bildirim gelir).
 - Fiyatlar 1 yetişkin, en ucuz paket (Eco) içindir.
 
 ## Sorun giderme

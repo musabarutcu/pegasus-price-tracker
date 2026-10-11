@@ -18,6 +18,7 @@ const MAX_TRACKS_PER_USER = 10;
 const MAX_RANGE_DAYS = 31;
 const MAX_DAYS_AHEAD = 330;
 const WORKFLOW_FILE = "check.yml";
+const WEBHOOK_VERSION = "2"; // artırılınca webhook ayarları ilk mesajda kendiliğinden yenilenir
 
 // ---------------------------------------------------------------- yerler
 
@@ -126,6 +127,32 @@ function parseDate(token, today) {
   return build(ty + 1);
 }
 
+// ---------------------------------------------------------------- saat
+
+const TIME_PRESETS = {
+  sabah: ["06:00", "12:00"],
+  ogle: ["12:00", "17:00"],
+  oglen: ["12:00", "17:00"],
+  ogleden: ["12:00", "17:00"],
+  aksam: ["17:00", "24:00"],
+  gece: ["00:00", "06:00"],
+};
+
+// "8", "08", "8:30", "08:30" → "08:30" | null
+function parseClock(s) {
+  const m = s.match(/^(\d{1,2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  const h = +m[1], mi = m[2] ? +m[2] : 0;
+  if (h > 24 || mi > 59 || (h === 24 && mi > 0)) return null;
+  return `${String(h).padStart(2, "0")}:${String(mi).padStart(2, "0")}`;
+}
+
+// Kalkış saati pencerenin içinde mi? (22:00-02:00 gibi gece yarısını aşan aralıklar da olur)
+function inWindow(time, from, to) {
+  if (!from || !to) return true;
+  return from <= to ? time >= from && time <= to : time >= from || time <= to;
+}
+
 // ---------------------------------------------------------------- biçim
 
 function fmtPrice(p) {
@@ -145,10 +172,12 @@ function trackTitle(t) {
   return `${esc(t.origin)} → ${esc(t.dest)}`;
 }
 
+// Tarih (+ varsa saat aralığı), örn. "20 Kas – 25 Kas · 🕐 08:00–12:00"
 function trackDates(t) {
-  return t.date_from === t.date_to
+  const d = t.date_from === t.date_to
     ? fmtDate(t.date_from)
     : `${fmtDate(t.date_from, false)} – ${fmtDate(t.date_to, false)}`;
+  return t.time_from ? `${d} · 🕐 ${t.time_from}–${t.time_to}` : d;
 }
 
 function routeLabel(route) {
@@ -172,13 +201,35 @@ async function tg(env, method, body) {
   return r;
 }
 
-function send(env, chatId, text) {
+function send(env, chatId, text, extra = {}) {
   return tg(env, "sendMessage", {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
     link_preview_options: { is_disabled: true },
+    ...extra,
   });
+}
+
+const BOT_COMMANDS = [
+  { command: "takip", description: "Yeni fiyat takibi başlat" },
+  { command: "liste", description: "Takiplerim ve güncel fiyatlar" },
+  { command: "iptal", description: "Takip iptal et / çıkar" },
+  { command: "kontrol", description: "Fiyatları şimdi kontrol et" },
+  { command: "yardim", description: "Kullanım kılavuzu" },
+];
+
+// Webhook ayarlarını (butonlar için callback_query dahil) ve komut menüsünü günceller
+async function configureWebhook(env, origin, dropPending = false) {
+  const r = await tg(env, "setWebhook", {
+    url: `${origin}/telegram`,
+    secret_token: await webhookSecret(env),
+    allowed_updates: ["message", "callback_query"],
+    drop_pending_updates: dropPending,
+  });
+  await tg(env, "setMyCommands", { commands: BOT_COMMANDS });
+  await setMeta(env, "webhook_v", WEBHOOK_VERSION);
+  return r;
 }
 
 async function webhookSecret(env) {
@@ -221,24 +272,61 @@ function setMeta(env, key, value) {
 
 // ---------------------------------------------------------------- komutlar
 
-const HELP = `✈️ <b>Pegasus Fiyat Takip</b>
+const HELP = `✈️ <b>Pegasus Fiyat Takip — Kullanım Kılavuzu</b>
 
-Rota ve tarih aralığını yaz, ilk fiyatları hemen göndereyim, sonra 30 dakikada bir kontrol edip fiyat değişince haber vereyim.
+Rota ve tarih yaz; ilk fiyatları 1-2 dakikada gönderirim, sonra <b>30 dakikada bir</b> kontrol edip fiyat değişince haber veririm.
 
-<b>Takip başlat</b>
+<b>1) Takip başlat</b>
 <code>/takip istanbul izmir 20.11 25.11</code>
-→ fiyat her değiştiğinde bildirir
+20-25 Kasım arası her günün en ucuz uçuşu; fiyat her değiştiğinde bildirim.
 
-<code>/takip izmir istanbul 23.11 1400</code>
-→ tek gün; sadece fiyat 1.400 TL veya altına inerse bildirir
+<code>/takip izmir istanbul 23.11</code>
+Tek gün.
 
-<b>Diğer komutlar</b>
-/liste — takiplerin ve güncel en ucuz fiyatlar
-/sil 2 — 2 numaralı takibi siler (/sil hepsi)
-/kontrol — fiyatları şimdi kontrol et
-/yardim — bu mesaj
+<b>2) Hedef fiyat</b> (sona bir sayı ekle)
+<code>/takip istanbul izmir 20.11 25.11 1400</code>
+Sadece fiyat <b>1.400 TL veya altına</b> inince bildirim.
 
-<i>İstanbul = Sabiha Gökçen + İstanbul Havalimanı. Sadece birini istersen "saw" veya "ist" yaz. Diğer şehirler: ankara, antalya, trabzon... ya da havalimanı kodu (ESB, AYT...).</i>`;
+<b>3) Saat aralığı</b>
+<code>/takip istanbul izmir 20.11 25.11 saat 08-12</code>
+Sadece 08:00-12:00 arası <b>kalkan</b> uçuşlar.
+Başka yazımlar: <code>08:30-11:00</code> · <code>saat 18 23</code> · <code>sabah</code> (06-12) · <code>öğle</code> (12-17) · <code>akşam</code> (17-24) · <code>gece</code> (00-06)
+
+Hepsi bir arada:
+<code>/takip istanbul izmir 20.11 25.11 akşam 1500</code>
+
+<b>4) Takiplerini gör</b>
+/liste — aktif takiplerin, en ucuz fiyatları ve silme butonları
+
+<b>5) Takip iptal et / çıkar</b>
+/iptal — listeyi butonlarla gösterir, ❌'ye bas
+<code>/iptal 2</code> — 2 numaralı takibi çıkarır (numaralar /liste'de)
+<code>/iptal 1 3</code> — birden fazla
+<code>/iptal hepsi</code> — tümünü çıkarır
+Komutsuz da olur: <code>çıkar 2</code>, <code>sil 1</code>, <code>iptal hepsi</code>
+
+<b>6) Diğer</b>
+/kontrol — beklemeden şimdi kontrol et
+/yardim — bu kılavuz
+
+<b>Bilmen gerekenler</b>
+• <b>İstanbul</b> = Sabiha Gökçen + İstanbul Havalimanı. Sadece biri için <code>saw</code> ya da <code>ist</code> yaz.
+• Diğer şehirler: ankara, antalya, trabzon, bodrum, dalaman, kayseri… ya da havalimanı kodu (ESB, AYT, TZX…).
+• Tarih: <code>20.11</code>, <code>20.11.2026</code> ya da <code>2026-11-20</code>.
+• <code>/takip</code> yazmadan <code>istanbul izmir 20.11 25.11</code> göndermek de olur.
+• Kişi başı en fazla ${MAX_TRACKS_PER_USER} takip, her takip en fazla ${MAX_RANGE_DAYS} gün. Tarihi geçen takipler kendiliğinden biter.
+• Fiyatlar 1 yetişkin, en ucuz paket (Eco) içindir.`;
+
+const TRACK_USAGE = `Örnekler:
+<code>/takip istanbul izmir 20.11 25.11</code>
+<code>/takip izmir istanbul 23.11 1400</code>  (hedef fiyat)
+<code>/takip istanbul izmir 20.11 25.11 saat 08-12</code>  (saat aralığı)
+
+Tüm seçenekler için /yardim`;
+
+const DELETE_WORDS = new Set(["sil", "iptal", "cikar", "kaldir", "durdur", "vazgec"]);
+const LIST_WORDS = new Set(["liste", "listele", "takiplerim", "takipler", "list"]);
+const HELP_WORDS = new Set(["start", "yardim", "help", "kilavuz", "komutlar"]);
 
 async function adminId(env) {
   return env.ADMIN_CHAT_ID || (await getMeta(env, "admin_chat_id"));
@@ -250,83 +338,133 @@ async function isAllowed(env, user) {
   return user.allowed === 1;
 }
 
+async function getUser(env, chatId, name) {
+  await env.DB.prepare("INSERT INTO users (chat_id, name) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET name = excluded.name")
+    .bind(chatId, name).run();
+  if (!(await adminId(env))) await setMeta(env, "admin_chat_id", chatId); // bota ilk yazan = sahibi
+  return env.DB.prepare("SELECT * FROM users WHERE chat_id = ?").bind(chatId).first();
+}
+
 async function handleUpdate(env, update, ctx) {
+  if (update.callback_query) return handleButton(env, update.callback_query);
+
   const msg = update.message || update.edited_message;
   if (!msg || !msg.text || msg.chat.type !== "private") return;
   const chatId = msg.chat.id;
-  const name = msg.from?.first_name || "";
   const text = msg.text.trim();
-
-  await env.DB.prepare("INSERT INTO users (chat_id, name) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET name = excluded.name")
-    .bind(chatId, name).run();
-  const user = await env.DB.prepare("SELECT * FROM users WHERE chat_id = ?").bind(chatId).first();
-  if (!(await adminId(env))) await setMeta(env, "admin_chat_id", chatId); // bota ilk yazan = sahibi
+  const user = await getUser(env, chatId, msg.from?.first_name || "");
 
   const [rawCmd, ...args] = text.split(/\s+/);
-  const cmd = rawCmd.startsWith("/") ? norm(rawCmd.split("@")[0]) : "";
+  const isSlash = rawCmd.startsWith("/");
+  const word = norm(isSlash ? rawCmd.split("@")[0] : rawCmd);
 
   if (!(await isAllowed(env, user))) {
-    if (cmd === "kod" && args[0] && norm(args[0]) === norm(env.ACCESS_CODE)) {
+    if (word === "kod" && args[0] && norm(args[0]) === norm(env.ACCESS_CODE)) {
       await env.DB.prepare("UPDATE users SET allowed = 1 WHERE chat_id = ?").bind(chatId).run();
       return send(env, chatId, "🔓 Erişim açıldı!\n\n" + HELP);
     }
     return send(env, chatId, "🔒 Bu bot özel. Erişim kodunu <code>/kod KOD</code> şeklinde gönder.");
   }
 
-  switch (cmd) {
-    case "start":
-    case "yardim":
-    case "help":
-      return send(env, chatId, HELP);
-    case "kod":
-      return send(env, chatId, "Zaten erişimin var 👍");
-    case "takip":
-      return cmdTrack(env, chatId, args, ctx);
-    case "liste":
-      return cmdList(env, chatId);
-    case "sil":
-      return cmdDelete(env, chatId, args);
-    case "kontrol": {
-      const ok = await dispatchCheck(env);
-      return send(env, chatId, ok ? "🔄 Kontrol başlatıldı, değişiklik varsa 1-2 dakika içinde bildiririm." : "⚠️ Kontrol başlatılamadı.");
-    }
-    case "":
-      // Komutsuz yazılan "istanbul izmir 20.11 25.11" gibi mesajları da takip olarak dene
-      return cmdTrack(env, chatId, text.split(/\s+/), ctx, true);
-    default:
-      return send(env, chatId, "Bu komutu tanımadım. /yardim yazarak kullanımı görebilirsin.");
+  // Komutlar hem "/iptal 2" hem de "iptal 2" / "çıkar 2" şeklinde çalışır
+  if (HELP_WORDS.has(word)) return send(env, chatId, HELP);
+  if (LIST_WORDS.has(word)) return sendList(env, chatId);
+  if (DELETE_WORDS.has(word)) return cmdDelete(env, chatId, args);
+  if (word === "kod") return send(env, chatId, "Zaten erişimin var 👍");
+  if (word === "durum") return cmdStatus(env, chatId);
+  if (word === "takip") return cmdTrack(env, chatId, args, ctx);
+  if (word === "kontrol") {
+    const ok = await dispatchCheck(env);
+    return send(env, chatId, ok ? "🔄 Kontrol başlatıldı, değişiklik varsa 1-2 dakika içinde bildiririm." : "⚠️ Kontrol başlatılamadı.");
   }
+  if (isSlash) return send(env, chatId, "Bu komutu tanımadım. /yardim yazarak kullanımı görebilirsin.");
+
+  // Komutsuz yazılan "istanbul izmir 20.11 25.11" gibi mesajları takip olarak dene
+  return cmdTrack(env, chatId, text.split(/\s+/), ctx, true);
+}
+
+// Sistem durumu (sadece admin): son kontrol, hatalar, kullanıcı/takip sayısı
+async function cmdStatus(env, chatId) {
+  if (String(chatId) !== String(await adminId(env))) return send(env, chatId, "Bu komut sadece bot sahibine açık.");
+  const fmtTime = (iso) => new Date(new Date(iso).getTime() + 3 * 3600 * 1000).toISOString().slice(0, 16).replace("T", " ");
+  const last = JSON.parse((await getMeta(env, "last_run")) || "null");
+  const lastOk = await getMeta(env, "last_success");
+  const fails = (await getMeta(env, "fail_count")) || "0";
+  const users = await env.DB.prepare("SELECT COUNT(*) AS n FROM users").first();
+  const tracks = await env.DB.prepare("SELECT COUNT(*) AS n FROM tracks").first();
+  const lines = ["🛠 <b>Sistem durumu</b>", ""];
+  lines.push(last
+    ? `Son kontrol: ${fmtTime(last.at)} — ${last.ok ? `✅ ${last.days} gün çekildi (${last.seconds} sn)` : "❌ başarısız"}`
+    : "Son kontrol: henüz yok");
+  if (last?.errors?.length) lines.push(`Hatalar:\n<code>${esc(last.errors.join("\n"))}</code>`);
+  lines.push(`Son başarılı kontrol: ${lastOk ? fmtTime(lastOk) : "yok"}`);
+  lines.push(`Üst üste başarısız: ${fails}`);
+  lines.push(`Kullanıcı: ${users.n} · Takip: ${tracks.n}`);
+  return send(env, chatId, lines.join("\n"));
+}
+
+// Saat aralığını ayıklar: "08-12", "08:30-11:00", "saat 8 12", "10:00 14:00", "sabah"...
+function extractTimes(args) {
+  const rest = [], clocks = [];
+  let preset = null, saatMode = 0;
+  for (const a of args) {
+    const n = norm(a);
+    if (TIME_PRESETS[n]) { preset = TIME_PRESETS[n]; continue; }
+    if (n === "saat" || n === "saatler" || n === "saatleri") { saatMode = 2; continue; }
+    if (["arasi", "arasinda", "arasindaki", "sonra", "once"].includes(n)) continue;
+    const range = a.match(/^(\d{1,2}(?::\d{2})?)[-–](\d{1,2}(?::\d{2})?)$/);
+    if (range) {
+      clocks.push(range[1], range[2]);
+      saatMode = 0;
+      continue;
+    }
+    if (/^\d{1,2}:\d{2}$/.test(a) || (saatMode > 0 && /^\d{1,2}$/.test(a))) {
+      clocks.push(a);
+      saatMode--;
+      continue;
+    }
+    saatMode = 0;
+    rest.push(a);
+  }
+  if (!clocks.length) return { rest, timeFrom: preset?.[0] ?? null, timeTo: preset?.[1] ?? null, timeError: null };
+  if (clocks.length !== 2) return { rest, timeError: "Saat aralığını başlangıç ve bitiş olarak yaz, örn. <code>saat 08-12</code>" };
+  const [f, t] = clocks.map(parseClock);
+  if (!f || !t) return { rest, timeError: "Saati anlayamadım. Örnek: <code>saat 08-12</code> veya <code>08:30-11:00</code>" };
+  if (f === t) return { rest, timeError: "Saat aralığının başı ve sonu aynı olamaz." };
+  return { rest, timeFrom: f, timeTo: t, timeError: null };
 }
 
 function parseTrackArgs(args, today) {
+  const { rest, timeFrom, timeTo, timeError } = extractTimes(args);
   // "istanbul-izmir" veya "20.11-25.11" gibi birleşik yazımları ayır (ISO tarihlere dokunma)
-  const tokens = args
+  const tokens = rest
     .flatMap((a) => (/^\d{4}-\d{1,2}-\d{1,2}$/.test(a) ? [a] : a.split(/[-–>]+/)))
     .filter(Boolean);
   const places = [], dates = [];
   let target = null;
   for (const tok of tokens) {
     const clean = tok.replace(/^(hedef|max|<=|≤|<):?/i, "").replace(/(tl|₺)$/i, "");
+    if (clean === "" || ["hedef", "tl"].includes(norm(tok))) continue;
     const d = parseDate(clean, today);
     if (d) { dates.push(d); continue; }
-    if (/^\d{1,3}(\.\d{3})*$|^\d+$/.test(clean) && clean !== "") {
+    if (/^\d{1,3}(\.\d{3})*$|^\d+$/.test(clean)) {
       target = Number(clean.replace(/\./g, ""));
       continue;
     }
-    if (clean === "") continue;
     places.push(tok);
   }
-  return { places, dates, target };
+  return { places, dates, target, timeFrom, timeTo, timeError };
 }
 
 async function cmdTrack(env, chatId, args, ctx, implicit = false) {
   const today = todayTR();
-  const { places, dates, target } = parseTrackArgs(args, today);
-  const usage = "Örnek: <code>/takip istanbul izmir 20.11 25.11</code> veya hedef fiyatla <code>/takip izmir istanbul 23.11 1400</code>";
+  if (!args.length) return send(env, chatId, `Nereden nereye, hangi tarihler?\n\n${TRACK_USAGE}`);
+  const { places, dates, target, timeFrom, timeTo, timeError } = parseTrackArgs(args, today);
 
   if (places.length !== 2 || dates.length < 1 || dates.length > 2) {
-    return send(env, chatId, implicit ? "Anlayamadım 🤔 /yardim yazarak kullanımı görebilirsin." : `Eksik ya da hatalı bilgi.\n${usage}`);
+    return send(env, chatId, implicit ? "Anlayamadım 🤔 /yardim yazarak kullanımı görebilirsin." : `Eksik ya da hatalı bilgi.\n\n${TRACK_USAGE}`);
   }
+  if (timeError) return send(env, chatId, timeError);
   const from = findPlace(places[0]);
   const to = findPlace(places[1]);
   if (!from) return send(env, chatId, `"${esc(places[0])}" şehrini tanımadım. Havalimanı kodu da yazabilirsin (örn. SAW, ADB).`);
@@ -341,19 +479,21 @@ async function cmdTrack(env, chatId, args, ctx, implicit = false) {
   if (target !== null && (target < 100 || target > 100000)) return send(env, chatId, "Hedef fiyat mantıklı görünmüyor.");
 
   const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM tracks WHERE chat_id = ?").bind(chatId).first();
-  if (count.n >= MAX_TRACKS_PER_USER) return send(env, chatId, `En fazla ${MAX_TRACKS_PER_USER} takip olabilir. /liste ve /sil ile yer açabilirsin.`);
+  if (count.n >= MAX_TRACKS_PER_USER) return send(env, chatId, `En fazla ${MAX_TRACKS_PER_USER} takip olabilir. /liste ile bakıp /iptal ile yer açabilirsin.`);
 
   await env.DB.prepare(
-    "INSERT INTO tracks (chat_id, origin, dest, dep_ports, arr_ports, date_from, date_to, target) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  ).bind(chatId, from.name, to.name, from.ports.join(","), to.ports.join(","), d1, d2, target).run();
+    `INSERT INTO tracks (chat_id, origin, dest, dep_ports, arr_ports, date_from, date_to, target, time_from, time_to)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(chatId, from.name, to.name, from.ports.join(","), to.ports.join(","), d1, d2, target, timeFrom, timeTo).run();
 
   ctx.waitUntil(dispatchCheck(env));
 
-  const t = { origin: from.name, dest: to.name, date_from: d1, date_to: d2 };
+  const t = { origin: from.name, dest: to.name, date_from: d1, date_to: d2, time_from: timeFrom, time_to: timeTo };
   const mode = target
     ? `🎯 Fiyat <b>${fmtPrice(target)}</b> veya altına inerse haber vereceğim.`
     : "🔔 Fiyat her değiştiğinde haber vereceğim.";
-  return send(env, chatId, `✅ Takip eklendi: <b>${trackTitle(t)}</b>\n📅 ${trackDates(t)}\n${mode}\n\n⏳ İlk fiyatlar 1-2 dakika içinde geliyor...`);
+  return send(env, chatId,
+    `✅ Takip eklendi: <b>${trackTitle(t)}</b>\n📅 ${trackDates(t)}\n${mode}\n\n⏳ İlk fiyatlar 1-2 dakika içinde geliyor...\n<i>İptal için: /iptal</i>`);
 }
 
 async function userTracks(env, chatId) {
@@ -361,19 +501,30 @@ async function userTracks(env, chatId) {
   return results;
 }
 
-async function cmdList(env, chatId) {
+// Takip listesi metni + her takip için ❌ butonu
+async function listView(env, chatId, header = "📋 <b>Aktif takiplerin</b>", prefix = "") {
   const tracks = await userTracks(env, chatId);
-  if (!tracks.length) return send(env, chatId, "Henüz takibin yok. Örnek: <code>/takip istanbul izmir 20.11 25.11</code>");
-  const lines = ["📋 <b>Takiplerin</b>", ""];
+  if (!tracks.length) {
+    return { text: `${prefix}Şu an aktif takibin yok.\n\n${TRACK_USAGE}`, reply_markup: { inline_keyboard: [] } };
+  }
+  const lines = [prefix + header, ""];
+  const buttons = [];
   for (const [i, t] of tracks.entries()) {
     const best = await env.DB.prepare(
       "SELECT * FROM track_prices WHERE track_id = ? AND price IS NOT NULL AND date >= ? ORDER BY price, date LIMIT 1",
     ).bind(t.id, todayTR()).first();
     lines.push(`<b>${i + 1}.</b> ${trackTitle(t)} · ${trackDates(t)}${t.target ? ` · 🎯 ${fmtPrice(t.target)}` : ""}`);
     lines.push(best ? `    En ucuz: <b>${fmtPrice(best.price)}</b> (${fmtDate(best.date)} ${best.time})` : "    Fiyat bekleniyor...");
+    buttons.push([{ text: `❌ ${i + 1}. ${t.origin} → ${t.dest} (${fmtDate(t.date_from, false)})`, callback_data: `del:${t.id}` }]);
   }
-  lines.push("", "Silmek için: /sil numara");
-  return send(env, chatId, lines.join("\n"));
+  if (tracks.length > 1) buttons.push([{ text: "🗑 Hepsini iptal et", callback_data: "delall" }]);
+  lines.push("", "İptal etmek için aşağıdaki ❌ butonuna bas ya da <code>/iptal numara</code> yaz.");
+  return { text: lines.join("\n"), reply_markup: { inline_keyboard: buttons } };
+}
+
+async function sendList(env, chatId, header) {
+  const v = await listView(env, chatId, header);
+  return send(env, chatId, v.text, { reply_markup: v.reply_markup });
 }
 
 async function deleteTrack(env, id) {
@@ -385,16 +536,66 @@ async function deleteTrack(env, id) {
 
 async function cmdDelete(env, chatId, args) {
   const tracks = await userTracks(env, chatId);
-  if (!tracks.length) return send(env, chatId, "Silinecek takip yok.");
-  if (args[0] && norm(args[0]) === "hepsi") {
+  if (!tracks.length) return send(env, chatId, "İptal edilecek takip yok.");
+  if (!args.length) return sendList(env, chatId, "Hangi takibi iptal edeyim? ❌ butonuna bas:");
+
+  if (["hepsi", "tumu", "hepsini", "tum"].includes(norm(args[0]))) {
     for (const t of tracks) await deleteTrack(env, t.id);
-    return send(env, chatId, `🗑 ${tracks.length} takip silindi.`);
+    return send(env, chatId, `🗑 ${tracks.length} takibin hepsi iptal edildi.`);
   }
-  const n = parseInt(args[0], 10);
-  if (!n || n < 1 || n > tracks.length) return send(env, chatId, "Hangi takibi sileyim? Örnek: <code>/sil 1</code> (numaralar /liste'de)");
-  const t = tracks[n - 1];
-  await deleteTrack(env, t.id);
-  return send(env, chatId, `🗑 Silindi: ${trackTitle(t)} · ${trackDates(t)}`);
+
+  const nums = [...new Set(args.flatMap((a) => a.split(/[,\s]+/)).map((a) => parseInt(a, 10)))];
+  const bad = nums.filter((n) => !n || n < 1 || n > tracks.length);
+  if (!nums.length || bad.length) {
+    return sendList(env, chatId, `Bu numarada takip yok. Takiplerin 1-${tracks.length} arası numaralı:`);
+  }
+  const removed = nums.map((n) => tracks[n - 1]);
+  for (const t of removed) await deleteTrack(env, t.id);
+  return send(env, chatId, "🗑 İptal edildi:\n" + removed.map((t) => `• ${trackTitle(t)} · ${trackDates(t)}`).join("\n"));
+}
+
+// Liste mesajındaki ❌ butonları
+async function handleButton(env, cq) {
+  const chatId = cq.message?.chat?.id;
+  const answer = (text) => tg(env, "answerCallbackQuery", { callback_query_id: cq.id, text });
+  if (!chatId || cq.message.chat.type !== "private") return answer("");
+  const user = await getUser(env, chatId, cq.from?.first_name || "");
+  if (!(await isAllowed(env, user))) return answer("Erişimin yok");
+
+  const refresh = async (header, prefix) => {
+    const v = await listView(env, chatId, header, prefix);
+    await tg(env, "editMessageText", {
+      chat_id: chatId, message_id: cq.message.message_id, text: v.text, parse_mode: "HTML",
+      link_preview_options: { is_disabled: true }, reply_markup: v.reply_markup,
+    });
+  };
+
+  if (cq.data?.startsWith("del:")) {
+    const id = Number(cq.data.slice(4));
+    const t = await env.DB.prepare("SELECT * FROM tracks WHERE id = ? AND chat_id = ?").bind(id, chatId).first();
+    if (!t) { await answer("Bu takip zaten yok"); return refresh(); }
+    await deleteTrack(env, id);
+    await answer(`İptal edildi: ${t.origin} → ${t.dest}`);
+    return refresh("📋 <b>Kalan takiplerin</b>", `🗑 İptal edildi: ${trackTitle(t)} · ${trackDates(t)}\n\n`);
+  }
+  if (cq.data === "delall") {
+    await answer("");
+    return tg(env, "editMessageReplyMarkup", {
+      chat_id: chatId, message_id: cq.message.message_id,
+      reply_markup: { inline_keyboard: [[
+        { text: "✅ Evet, hepsini iptal et", callback_data: "delall!" },
+        { text: "↩️ Vazgeç", callback_data: "back" },
+      ]] },
+    });
+  }
+  if (cq.data === "delall!") {
+    const tracks = await userTracks(env, chatId);
+    for (const t of tracks) await deleteTrack(env, t.id);
+    await answer(`${tracks.length} takip iptal edildi`);
+    return refresh(undefined, `🗑 ${tracks.length} takibin hepsi iptal edildi.\n\n`);
+  }
+  await answer("");
+  return refresh();
 }
 
 // ---------------------------------------------------------------- Actions API
@@ -436,6 +637,7 @@ function bestForTrack(t, fares, today) {
         if (!flights) continue;
         seen = true;
         for (const f of flights) {
+          if (!inWindow(f.time, t.time_from, t.time_to)) continue;
           if (!best || f.price < best.price || (f.price === best.price && f.time < best.time)) {
             best = { price: f.price, time: f.time, flight: f.no, route: `${dep}-${arr}`, direct: f.direct !== false };
           }
@@ -455,7 +657,7 @@ function initialMessage(t, best) {
   for (const d of dates) {
     const b = best[d];
     lines.push(b.price === null
-      ? `${fmtDate(d)} — satışta uçuş yok`
+      ? `${fmtDate(d)} — ${t.time_from ? "bu saatlerde " : ""}satışta uçuş yok`
       : `${fmtDate(d)} — <b>${fmtPrice(b.price)}</b> · ${flightInfo(b)}${d === cheapest && priced.length > 1 ? " ⭐" : ""}`);
   }
   const missing = dateRange(t.date_from < todayTR() ? todayTR() : t.date_from, t.date_to).filter((d) => !best[d]);
@@ -479,7 +681,7 @@ function changeMessage(t, changes) {
   let linkDate = null;
   for (const { date, prev, cur } of changes) {
     if (cur.price === null) {
-      lines.push(`❌ ${fmtDate(date)}: satışta uçuş kalmadı (önce ${fmtPrice(prev.price)})`);
+      lines.push(`❌ ${fmtDate(date)}: ${t.time_from ? "bu saatlerde " : ""}satışta uçuş kalmadı (önce ${fmtPrice(prev.price)})`);
       continue;
     }
     const was = prev && prev.price !== null ? prev.price : null;
@@ -497,6 +699,10 @@ function changeMessage(t, changes) {
 
 async function apiResults(env, body) {
   const ok = body.ok && Array.isArray(body.results) && body.results.length > 0;
+  await setMeta(env, "last_run", JSON.stringify({
+    at: new Date().toISOString(), ok, days: (body.results || []).length,
+    seconds: body.seconds, errors: (body.errors || []).slice(0, 5),
+  }));
   if (!ok) {
     const fails = Number((await getMeta(env, "fail_count")) || 0) + 1;
     await setMeta(env, "fail_count", fails);
@@ -591,6 +797,8 @@ export default {
         return new Response("forbidden", { status: 403 });
       }
       const update = await request.json();
+      // Yeni sürümde webhook ayarları değiştiyse (ör. butonlar) ilk mesajda kendiliğinden güncelle
+      if ((await getMeta(env, "webhook_v")) !== WEBHOOK_VERSION) ctx.waitUntil(configureWebhook(env, url.origin));
       try {
         await handleUpdate(env, update, ctx);
       } catch (e) {
@@ -609,21 +817,7 @@ export default {
     // Kurulum: tarayıcıda https://<worker>/setup?key=<API_SECRET> aç
     if (url.pathname === "/setup") {
       if (url.searchParams.get("key") !== env.API_SECRET) return new Response("forbidden", { status: 403 });
-      const hook = await tg(env, "setWebhook", {
-        url: `${url.origin}/telegram`,
-        secret_token: await webhookSecret(env),
-        allowed_updates: ["message"],
-        drop_pending_updates: true,
-      });
-      await tg(env, "setMyCommands", {
-        commands: [
-          { command: "takip", description: "Yeni fiyat takibi başlat" },
-          { command: "liste", description: "Takiplerim ve güncel fiyatlar" },
-          { command: "sil", description: "Takip sil" },
-          { command: "kontrol", description: "Fiyatları şimdi kontrol et" },
-          { command: "yardim", description: "Kullanım" },
-        ],
-      });
+      const hook = await configureWebhook(env, url.origin, true);
       const gh = env.GH_TOKEN && env.GH_REPO ? "GitHub bağlantısı ayarlı" : "UYARI: GH_TOKEN / GH_REPO eksik";
       return new Response(`Telegram webhook: ${(await hook.json()).description}\n${gh}\n`);
     }

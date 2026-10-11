@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS tracks (
   date_from   TEXT NOT NULL,  -- YYYY-MM-DD
   date_to     TEXT NOT NULL,
   target      REAL,           -- NULL: her değişiklikte bildir
+  time_from   TEXT,           -- "08:00"; NULL: tüm gün
+  time_to     TEXT,           -- "12:00"
   initialized INTEGER NOT NULL DEFAULT 0,
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
