@@ -34,17 +34,17 @@ Gerekenler: GitHub hesabı, Cloudflare hesabı (ücretsiz, kredi kartı istemez)
 3. Verdiği **token**'ı bir kenara not et (kimseyle paylaşma).
 
 ### 2. GitHub deposunu oluştur ve kodu yükle
-1. github.com → **New repository** → ad: `pegasus-fiyat-takip`, **Public** seç (public depolarda Actions dakikaları sınırsız ve ücretsiz; depoda hiçbir gizli bilgi yok), README ekleme → **Create**.
+1. github.com → **New repository** → ad: `pegasus-price-tracker`, **Public** seç (public depolarda Actions dakikaları sınırsız ve ücretsiz; depoda hiçbir gizli bilgi yok), README ekleme → **Create**.
 2. Bu klasörde terminal aç:
    ```bash
-   git remote add origin https://github.com/KULLANICI_ADIN/pegasus-fiyat-takip.git
+   git remote add origin https://github.com/KULLANICI_ADIN/pegasus-price-tracker.git
    git push -u origin main
    ```
 
 ### 3. GitHub token oluştur (Worker'ın kontrolü başlatabilmesi için)
 1. github.com → sağ üst profil → **Settings** → en altta **Developer settings** → **Personal access tokens** → **Fine-grained tokens** → **Generate new token**.
 2. Ad: `pegasus-takip`, süre: istediğin kadar (en fazla 1 yıl; bitince yenilemen gerekir).
-3. **Repository access** → *Only select repositories* → `pegasus-fiyat-takip`.
+3. **Repository access** → *Only select repositories* → `pegasus-price-tracker`.
 4. **Permissions** → Repository permissions → **Actions: Read and write**.
 5. **Generate token** → `github_pat_...` ile başlayan token'ı not et.
 

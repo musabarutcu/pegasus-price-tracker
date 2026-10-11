@@ -38,7 +38,7 @@ npx wrangler d1 execute pegasus-takip --remote --file schema.sql -y | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Tablolar oluşturulamadı" }
 
 Adim "GitHub deposu"
-$repo = Read-Host "GitHub deposu (ör. kullaniciadi/pegasus-fiyat-takip)"
+$repo = Read-Host "GitHub deposu (ör. kullaniciadi/pegasus-price-tracker)"
 $repo = $repo.Trim() -replace '^https://github.com/', '' -replace '\.git$', '' -replace '/$', ''
 $toml = $toml -replace 'GH_REPO = "[^"]*"', ('GH_REPO = "' + $repo + '"')
 [System.IO.File]::WriteAllText((Join-Path (Get-Location) "wrangler.toml"), $toml, (New-Object System.Text.UTF8Encoding $false))
