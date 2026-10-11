@@ -1,0 +1,15 @@
+name = "pegasus-takip"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+# Her 30 dakikada bir fiyat kontrolünü tetikler
+[triggers]
+crons = ["*/30 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "pegasus-takip"
+database_id = "00000000-0000-0000-0000-000000000000"   # kurulum.ps1 doldurur
+
+[vars]
+GH_REPO = "KULLANICI/pegasus-fiyat-takip"   # kurulum.ps1 doldurur

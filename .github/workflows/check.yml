@@ -1,0 +1,37 @@
+name: Fiyat kontrol
+
+# Cloudflare Worker tetikler (yeni takip eklenince ve 30 dakikada bir).
+on:
+  workflow_dispatch:
+
+# Aynı anda tek kontrol çalışsın; arkadan gelen bir tanesi sırada beklesin.
+concurrency:
+  group: fiyat-kontrol
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: checker/requirements.txt
+
+      - name: Bağımlılıklar
+        run: |
+          pip install -r checker/requirements.txt
+          which xvfb-run || (sudo apt-get update && sudo apt-get install -y xvfb)
+          google-chrome --version
+
+      - name: Fiyatları kontrol et
+        working-directory: checker
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          API_SECRET: ${{ secrets.API_SECRET }}
+        # Akamai headless tarayıcıyı engelliyor; sanal ekranda gerçek Chrome açıyoruz
+        run: xvfb-run -a --server-args="-screen 0 1366x900x24" python check.py
