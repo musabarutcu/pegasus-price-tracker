@@ -34,6 +34,7 @@ if (-not $db) {
 if (-not $db) { throw "D1 veritabanı oluşturulamadı" }
 $toml = $toml -replace 'database_id = "[^"]*"', ('database_id = "' + $db.uuid + '"')
 Write-Host "Veritabanı: $($db.uuid)"
+[System.IO.File]::WriteAllText((Join-Path (Get-Location) "wrangler.toml"), $toml, (New-Object System.Text.UTF8Encoding $false))
 npx wrangler d1 execute pegasus-takip --remote --file schema.sql -y | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Tablolar oluşturulamadı" }
 
