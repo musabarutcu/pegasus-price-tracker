@@ -9,7 +9,7 @@ crons = ["*/30 * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "pegasus-takip"
-database_id = "00000000-0000-0000-0000-000000000000"   # kurulum.ps1 doldurur
+database_id = "f14a1566-b845-44a2-a47e-a033db657921"   # kurulum.ps1 doldurur
 
 [vars]
-GH_REPO = "KULLANICI/pegasus-price-tracker"   # kurulum.ps1 doldurur
+GH_REPO = "musabarutcu/pegasus-price-tracker"   # kurulum.ps1 doldurur
