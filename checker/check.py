@@ -1,11 +1,15 @@
 """Bir kontrol turu: Worker'dan işleri al, fiyatları çek, sonuçları Worker'a gönder.
 
+Sunucuda her dakika çalışır. Worker "due" demedikçe (yeni takip, /kontrol ya da
+son kontrolün üzerinden 30 dakika geçmesi) hiçbir şey yapmadan çıkar; böylece yeni
+takiplerin ilk fiyatları ~1 dakikada gelir.
+
 Ortam değişkenleri:
   WORKER_URL  — örn. https://pegasus-takip.<hesap>.workers.dev
   API_SECRET  — Worker'daki API_SECRET ile aynı
-  HEADLESS    — "1" ise pencere açmadan dener (Akamai genelde engeller; varsayılan 0)
+  SOURCE      — "obilet" (varsayılan) ya da "pegasus" (Pegasus sitesi; sadece ev internetinde çalışır)
 
-Kendi bilgisayarında sürekli çalıştırmak için:  python check.py --loop 30
+Kendi bilgisayarında sürekli çalıştırmak için:  python check.py --loop 1
 """
 
 import asyncio
@@ -15,10 +19,9 @@ import sys
 import time
 import urllib.request
 
-from scraper import fetch_all
-
 WORKER_URL = os.environ.get("WORKER_URL", "").rstrip("/")
 API_SECRET = os.environ.get("API_SECRET", "")
+SOURCE = os.environ.get("SOURCE", "obilet")
 
 
 def api(path, payload=None):
@@ -33,28 +36,41 @@ def api(path, payload=None):
         return json.loads(r.read().decode())
 
 
-def run_once():
+def fetch(queries):
+    if SOURCE == "pegasus":
+        from scraper import fetch_all
+        return asyncio.run(fetch_all(queries, headless=os.environ.get("HEADLESS") == "1"))
+    from obilet import fetch_all
+    return fetch_all(queries)
+
+
+def run_once(force=False):
     jobs = api("/api/jobs")
+    if not jobs.get("due", True) and not force:
+        return True
     queries = jobs.get("queries", [])
     total = sum(len(q["dates"]) for q in queries)
-    print(f"{len(queries)} rota, {total} gün kontrol edilecek")
+    print(time.strftime("%H:%M"), f"{len(queries)} rota, {total} gün kontrol ediliyor ({jobs.get('reason', '')})", flush=True)
     if not queries:
         return True
 
     started = time.time()
     try:
-        results, errors = asyncio.run(fetch_all(queries, headless=os.environ.get("HEADLESS") == "1"))
-    except Exception as e:  # tarayıcı açılamadı vb.
+        results, errors = fetch(queries)
+    except Exception as e:
         results, errors = [], [f"{type(e).__name__}: {e}"]
 
     ok = bool(results)
     resp = api("/api/results", {
         "ok": ok,
+        "full": jobs.get("full", True),
         "results": results,
         "errors": errors[:20],
         "seconds": round(time.time() - started),
     })
-    print(f"{len(results)} gün çekildi, {len(errors)} hata, {resp.get('notified', 0)} bildirim gönderildi")
+    print(f"  {len(results)} gün çekildi, {len(errors)} hata, {resp.get('notified', 0)} bildirim", flush=True)
+    for e in errors[:5]:
+        print("  !", e, flush=True)
     return ok
 
 
@@ -63,15 +79,15 @@ def main():
         sys.exit("WORKER_URL ve API_SECRET ortam değişkenleri gerekli")
 
     if "--loop" in sys.argv:
-        minutes = int(sys.argv[sys.argv.index("--loop") + 1])
+        minutes = float(sys.argv[sys.argv.index("--loop") + 1])
         while True:
             try:
                 run_once()
             except Exception as e:
-                print("Hata:", e)
+                print("Hata:", e, flush=True)
             time.sleep(minutes * 60)
     else:
-        sys.exit(0 if run_once() else 1)
+        sys.exit(0 if run_once(force="--force" in sys.argv) else 1)
 
 
 if __name__ == "__main__":

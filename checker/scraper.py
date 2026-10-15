@@ -10,6 +10,7 @@ Her istek seçilen günün bir öncesini ve sonrasını da döndürür (3 gün).
 
 import asyncio
 import json
+import os
 import random
 from datetime import date, timedelta
 
@@ -94,7 +95,9 @@ async def fetch_all(queries, headless=False, log=print):
         return results, errors
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(channel="chrome", headless=headless)
+        # BROWSER_CHANNEL="" → patchright'ın kendi Chromium'u (ARM sunucularda Google Chrome yok)
+        channel = os.environ.get("BROWSER_CHANNEL", "chrome") or None
+        browser = await p.chromium.launch(channel=channel, headless=headless)
         ctx = await browser.new_context(locale="tr-TR", timezone_id="Europe/Istanbul")
         page = await ctx.new_page()
 
