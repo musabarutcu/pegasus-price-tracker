@@ -1,0 +1,10 @@
+[Unit]
+Description=Pegasus fiyat takip - her dakika Worker'a "kontrol zamanı mı?" diye sor
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

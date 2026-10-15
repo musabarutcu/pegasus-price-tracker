@@ -1,0 +1,13 @@
+[Unit]
+Description=Pegasus fiyat takip - tek kontrol turu
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/pegasus-takip/checker
+EnvironmentFile=/home/ubuntu/pegasus-takip/.env
+Environment=PYTHONIOENCODING=utf-8
+ExecStart=/home/ubuntu/venv/bin/python check.py
+TimeoutStartSec=15min
