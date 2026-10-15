@@ -3,21 +3,21 @@
 // Görevleri:
 //  - Telegram botunun komutlarını anında cevaplar (/takip, /liste, /sil ...)
 //  - Takipleri D1 veritabanında tutar
-//  - Yeni takipte ve 30 dakikada bir GitHub Actions'taki fiyat kontrolünü tetikler
-//  - Actions'tan gelen fiyatları önceki fiyatlarla karşılaştırıp bildirim gönderir
+//  - Fiyat çekiciye (sunucuda her dakika /api/jobs'a sorar) ne zaman kontrol yapacağını söyler:
+//    yeni takip eklenince hemen, /kontrol denince hemen, yoksa 30 dakikada bir
+//  - Çekiciden gelen fiyatları önceki fiyatlarla karşılaştırıp bildirim gönderir
 //
 // Ortam değişkenleri (wrangler secret / vars):
 //  TELEGRAM_TOKEN  BotFather'dan alınan token                  (secret)
-//  API_SECRET      Actions ile Worker arasındaki ortak şifre     (secret)
-//  GH_TOKEN        GitHub fine-grained token (Actions: write)    (secret)
-//  GH_REPO         "kullanici/repo"                              (var)
+//  API_SECRET      Fiyat çekici ile Worker arasındaki ortak şifre (secret)
 //  ACCESS_CODE     Boş değilse bota erişim için /kod gerekir      (secret, opsiyonel)
 //  ADMIN_CHAT_ID   Hata uyarılarının gideceği chat id; boşsa bota ilk yazan kişi admin olur (opsiyonel)
 
 const MAX_TRACKS_PER_USER = 10;
 const MAX_RANGE_DAYS = 31;
 const MAX_DAYS_AHEAD = 330;
-const WORKFLOW_FILE = "check.yml";
+const CHECK_INTERVAL_MIN = 30; // tam kontrol aralığı
+const RETRY_AFTER_FAIL_MIN = 5; // başarısız kontrolden sonra en erken tekrar
 const WEBHOOK_VERSION = "2"; // artırılınca webhook ayarları ilk mesajda kendiliğinden yenilenir
 
 // ---------------------------------------------------------------- yerler
@@ -156,7 +156,8 @@ function inWindow(time, from, to) {
 // ---------------------------------------------------------------- biçim
 
 function fmtPrice(p) {
-  return p.toLocaleString("tr-TR", { maximumFractionDigits: 2 }) + " TL";
+  const frac = Math.round(p * 100) % 100 !== 0;
+  return p.toLocaleString("tr-TR", { minimumFractionDigits: frac ? 2 : 0, maximumFractionDigits: 2 }) + " TL";
 }
 
 function bookingLink(route, date) {
@@ -237,25 +238,12 @@ async function webhookSecret(env) {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 48);
 }
 
-// ---------------------------------------------------------------- github
+// ---------------------------------------------------------------- kontrol isteği
 
-async function dispatchCheck(env) {
-  if (!env.GH_TOKEN || !env.GH_REPO) return false;
-  const r = await fetch(
-    `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.GH_TOKEN}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "pegasus-takip-worker",
-      },
-      body: JSON.stringify({ ref: env.GH_BRANCH || "main" }),
-    },
-  );
-  if (!r.ok) console.log("GitHub dispatch hatası", r.status, await r.text());
-  return r.ok;
+// Fiyat çekici her dakika /api/jobs'a soruyor; bu işaret bir sonraki sorusunda hemen kontrol yaptırır
+async function requestCheck(env) {
+  await setMeta(env, "check_requested", Date.now());
+  return true;
 }
 
 // ---------------------------------------------------------------- meta
@@ -274,7 +262,7 @@ function setMeta(env, key, value) {
 
 const HELP = `✈️ <b>Pegasus Fiyat Takip — Kullanım Kılavuzu</b>
 
-Rota ve tarih yaz; ilk fiyatları 1-2 dakikada gönderirim, sonra <b>30 dakikada bir</b> kontrol edip fiyat değişince haber veririm.
+Rota ve tarih yaz; ilk fiyatları ~1 dakikada gönderirim, sonra <b>30 dakikada bir</b> kontrol edip fiyat değişince haber veririm.
 
 <b>1) Takip başlat</b>
 <code>/takip istanbul izmir 20.11 25.11</code>
@@ -289,7 +277,7 @@ Sadece fiyat <b>1.400 TL veya altına</b> inince bildirim.
 
 <b>3) Saat aralığı</b>
 <code>/takip istanbul izmir 20.11 25.11 saat 08-12</code>
-Sadece 08:00-12:00 arası <b>kalkan</b> uçuşlar.
+Sadece 08:00-12:00 arası <b>kalkan</b> uçuşlar. Bu aralıktaki <b>her uçuş ayrı ayrı</b> takip edilir; herhangi birinin fiyatı değişince (ya da hedefin altına inince) bildirim gelir.
 Başka yazımlar: <code>08:30-11:00</code> · <code>saat 18 23</code> · <code>sabah</code> (06-12) · <code>öğle</code> (12-17) · <code>akşam</code> (17-24) · <code>gece</code> (00-06)
 
 Hepsi bir arada:
@@ -374,8 +362,8 @@ async function handleUpdate(env, update, ctx) {
   if (word === "durum") return cmdStatus(env, chatId);
   if (word === "takip") return cmdTrack(env, chatId, args, ctx);
   if (word === "kontrol") {
-    const ok = await dispatchCheck(env);
-    return send(env, chatId, ok ? "🔄 Kontrol başlatıldı, değişiklik varsa 1-2 dakika içinde bildiririm." : "⚠️ Kontrol başlatılamadı.");
+    await requestCheck(env);
+    return send(env, chatId, "🔄 Kontrol sıraya alındı; 1-2 dakika içinde yapılır, değişiklik varsa bildiririm.");
   }
   if (isSlash) return send(env, chatId, "Bu komutu tanımadım. /yardim yazarak kullanımı görebilirsin.");
 
@@ -486,14 +474,12 @@ async function cmdTrack(env, chatId, args, ctx, implicit = false) {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(chatId, from.name, to.name, from.ports.join(","), to.ports.join(","), d1, d2, target, timeFrom, timeTo).run();
 
-  ctx.waitUntil(dispatchCheck(env));
-
   const t = { origin: from.name, dest: to.name, date_from: d1, date_to: d2, time_from: timeFrom, time_to: timeTo };
   const mode = target
     ? `🎯 Fiyat <b>${fmtPrice(target)}</b> veya altına inerse haber vereceğim.`
     : "🔔 Fiyat her değiştiğinde haber vereceğim.";
   return send(env, chatId,
-    `✅ Takip eklendi: <b>${trackTitle(t)}</b>\n📅 ${trackDates(t)}\n${mode}\n\n⏳ İlk fiyatlar 1-2 dakika içinde geliyor...\n<i>İptal için: /iptal</i>`);
+    `✅ Takip eklendi: <b>${trackTitle(t)}</b>\n📅 ${trackDates(t)}\n${mode}\n\n⏳ İlk fiyatlar ~1 dakika içinde geliyor...\n<i>İptal için: /iptal</i>`);
 }
 
 async function userTracks(env, chatId) {
@@ -530,6 +516,7 @@ async function sendList(env, chatId, header) {
 async function deleteTrack(env, id) {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM track_prices WHERE track_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM track_flights WHERE track_id = ?").bind(id),
     env.DB.prepare("DELETE FROM tracks WHERE id = ?").bind(id),
   ]);
 }
@@ -605,10 +592,30 @@ async function activeTracks(env) {
   return results;
 }
 
+// Şimdi kontrol zamanı mı? Yeni takip / /kontrol isteği → hemen; yoksa son kontrolden 30 dk sonra.
+// Sadece yeni takipler yüzünden kontrol yapılıyorsa yalnızca onların tarihleri istenir (hızlı ilk fiyat).
+async function checkDue(env, tracks) {
+  const now = Date.now();
+  const lastCheck = Number((await getMeta(env, "last_check_at")) || 0);
+  const lastFull = Number((await getMeta(env, "last_full_check_at")) || 0);
+  const requested = Number((await getMeta(env, "check_requested")) || 0);
+  const failing = Number((await getMeta(env, "fail_count")) || 0) > 0;
+
+  if (failing && (now - lastCheck) / 60000 < RETRY_AFTER_FAIL_MIN) return { due: false };
+  if ((now - lastFull) / 60000 >= CHECK_INTERVAL_MIN) return { due: true, reason: "30 dk kontrolü", onlyNew: false };
+  if (requested > lastFull) return { due: true, reason: "istek", onlyNew: false };
+  if (tracks.some((t) => !t.initialized)) return { due: true, reason: "yeni takip", onlyNew: true };
+  return { due: false };
+}
+
 async function apiJobs(env) {
   const today = todayTR();
+  const tracks = await activeTracks(env);
+  const { due, reason, onlyNew } = await checkDue(env, tracks);
+  if (!due) return { due: false, queries: [] };
+
   const byPair = new Map();
-  for (const t of await activeTracks(env)) {
+  for (const t of onlyNew ? tracks.filter((x) => !x.initialized) : tracks) {
     const days = dateRange(t.date_from < today ? today : t.date_from, t.date_to);
     for (const dep of t.dep_ports.split(",")) {
       for (const arr of t.arr_ports.split(",")) {
@@ -622,7 +629,7 @@ async function apiJobs(env) {
     const [dep, arr] = key.split("-");
     return { dep, arr, dates: [...set].sort() };
   });
-  return { queries };
+  return { due: true, full: !onlyNew, reason, queries };
 }
 
 // Bir takip için gün gün en ucuz uçuş. undefined = o gün için veri gelmedi.
@@ -697,8 +704,141 @@ function changeMessage(t, changes) {
   return lines.join("\n");
 }
 
+// ---------------------------------------------------------------- uçuş bazlı takip (saat aralıklı takipler)
+
+// Aralıktaki her uçuş: { tarih: [uçuş...] }. Verisi gelmeyen günler sonuçta yer almaz.
+function flightsForTrack(t, fares, today) {
+  const out = {};
+  const from = t.date_from < today ? today : t.date_from;
+  for (const date of dateRange(from, t.date_to)) {
+    let seen = false;
+    const list = [];
+    for (const dep of t.dep_ports.split(",")) {
+      for (const arr of t.arr_ports.split(",")) {
+        const flights = fares.get(`${dep}-${arr}|${date}`);
+        if (!flights) continue;
+        seen = true;
+        for (const f of flights) {
+          if (!inWindow(f.time, t.time_from, t.time_to)) continue;
+          list.push({ key: `${f.no}|${dep}-${arr}`, flight: f.no, time: f.time, route: `${dep}-${arr}`, price: f.price, direct: f.direct !== false });
+        }
+      }
+    }
+    if (seen) out[date] = list.sort((a, b) => a.time.localeCompare(b.time));
+  }
+  return out;
+}
+
+function flightLine(f) {
+  return `${f.time} ${f.flight} ${routeLabel(f.route)}${f.direct === false || f.direct === 0 ? " (aktarmalı)" : ""}`;
+}
+
+function initialFlightsMessage(t, byDate) {
+  const lines = [`✈️ <b>${trackTitle(t)}</b> · ${trackDates(t)}`, ""];
+  let cheapest = null;
+  for (const date of Object.keys(byDate).sort()) {
+    lines.push(`📅 <b>${fmtDate(date)}</b>`);
+    if (!byDate[date].length) lines.push("   bu saatlerde satışta uçuş yok");
+    for (const f of byDate[date]) {
+      lines.push(`   ${flightLine(f)} — <b>${fmtPrice(f.price)}</b>`);
+      if (!cheapest || f.price < cheapest.price) cheapest = { ...f, date };
+    }
+  }
+  const missing = dateRange(t.date_from < todayTR() ? todayTR() : t.date_from, t.date_to).filter((d) => !byDate[d]);
+  if (missing.length) lines.push(`<i>${missing.length} gün için fiyat alınamadı, sonraki kontrolde denenecek.</i>`);
+  lines.push("");
+  if (cheapest && t.target !== null && cheapest.price <= t.target) {
+    lines.push("🎯 <b>Şu an zaten hedefin altında uçuş var!</b> Daha da düşerse yine haber vereceğim.");
+  }
+  if (cheapest) {
+    lines.push(`🔗 <a href="${bookingLink(cheapest.route, cheapest.date)}">En ucuz uçuşu (${fmtDate(cheapest.date, false)} ${cheapest.time}) Pegasus'ta aç</a>`);
+  }
+  lines.push(t.target
+    ? `🎯 Bu saatlerdeki her uçuşu 30 dakikada bir kontrol edeceğim; biri ${fmtPrice(t.target)} veya altına inerse haber vereceğim.`
+    : "🔔 Bu saatlerdeki her uçuşu 30 dakikada bir kontrol edeceğim; herhangi birinin fiyatı değişirse haber vereceğim.");
+  return lines.join("\n");
+}
+
+// Önceki kontrole göre uçuş bazında değişiklikler. Daha önce hiç bakılmamış günler sessizce kaydedilir.
+function flightChanges(t, byDate, prevRows) {
+  const prev = {};
+  for (const r of prevRows) (prev[r.date] ||= {})[r.flight_key] = r;
+  const changes = [];
+  for (const [date, list] of Object.entries(byDate)) {
+    const p = prev[date];
+    if (!p) continue;
+    const now = new Set();
+    for (const f of list) {
+      now.add(f.key);
+      const old = p[f.key];
+      if (t.target !== null) {
+        if (f.price <= t.target && (!old || old.price > t.target || f.price < old.price)) changes.push({ date, f, old });
+      } else if (!old || old.price !== f.price) {
+        changes.push({ date, f, old });
+      }
+    }
+    if (t.target === null) {
+      for (const [k, old] of Object.entries(p)) {
+        if (k !== "_" && !now.has(k)) changes.push({ date, f: null, old });
+      }
+    }
+  }
+  return changes.sort((a, b) => a.date.localeCompare(b.date) || (a.f || a.old).time.localeCompare((b.f || b.old).time));
+}
+
+function flightChangeMessage(t, changes) {
+  const lines = [t.target !== null
+    ? `🎯 <b>Hedef fiyat yakalandı!</b> ${trackTitle(t)} (≤ ${fmtPrice(t.target)})`
+    : `🔔 <b>Fiyat değişti</b> · ${trackTitle(t)} · 🕐 ${t.time_from}–${t.time_to}`, ""];
+  let day = null, link = null;
+  for (const { date, f, old } of changes) {
+    if (date !== day) {
+      lines.push(`📅 <b>${fmtDate(date)}</b>`);
+      day = date;
+    }
+    if (!f) {
+      lines.push(`   ❌ ${flightLine(old)}: satışta değil (önce ${fmtPrice(old.price)})`);
+      continue;
+    }
+    if (!old) lines.push(`   🆕 ${flightLine(f)}: <b>${fmtPrice(f.price)}</b>`);
+    else lines.push(`   ${f.price < old.price ? "⬇️" : "⬆️"} ${flightLine(f)}: <s>${fmtPrice(old.price)}</s> → <b>${fmtPrice(f.price)}</b>`);
+    if (!link || f.price < link.price) link = { ...f, date };
+  }
+  if (link) lines.push("", `🔗 <a href="${bookingLink(link.route, link.date)}">${fmtDate(link.date, false)} ${link.time} uçuşunu Pegasus'ta aç</a>`);
+  return lines.join("\n");
+}
+
+function flightRowStatements(env, t, byDate) {
+  const stmts = [];
+  for (const [date, list] of Object.entries(byDate)) {
+    stmts.push(env.DB.prepare("DELETE FROM track_flights WHERE track_id = ? AND date = ?").bind(t.id, date));
+    const rows = list.length ? list : [{ key: "_", flight: null, time: null, route: null, price: null, direct: null }];
+    for (const f of rows) {
+      stmts.push(env.DB.prepare(
+        "INSERT INTO track_flights (track_id, date, flight_key, flight, time, route, price, direct) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).bind(t.id, date, f.key, f.flight, f.time, f.route, f.price, f.direct === null ? null : f.direct ? 1 : 0));
+    }
+  }
+  return stmts;
+}
+
+// Telegram mesaj sınırı 4096 karakter; uzun listeleri satır sınırından böl
+async function sendLong(env, chatId, text) {
+  let chunk = "";
+  for (const line of text.split("\n")) {
+    if (chunk && chunk.length + line.length + 1 > 3900) {
+      await send(env, chatId, chunk);
+      chunk = "";
+    }
+    chunk += (chunk ? "\n" : "") + line;
+  }
+  if (chunk) await send(env, chatId, chunk);
+}
+
 async function apiResults(env, body) {
   const ok = body.ok && Array.isArray(body.results) && body.results.length > 0;
+  await setMeta(env, "last_check_at", Date.now());
+  if (body.full !== false) await setMeta(env, "last_full_check_at", Date.now());
   await setMeta(env, "last_run", JSON.stringify({
     at: new Date().toISOString(), ok, days: (body.results || []).length,
     seconds: body.seconds, errors: (body.errors || []).slice(0, 5),
@@ -735,7 +875,18 @@ async function apiResults(env, body) {
     const prev = Object.fromEntries(rows.map((r) => [r.date, r]));
 
     let message = null;
-    if (!t.initialized) {
+    const extra = [];
+    if (t.time_from) {
+      // Saat aralıklı takip: aralıktaki her uçuş ayrı izlenir
+      const byDate = flightsForTrack(t, fares, today);
+      const { results: frows } = await env.DB.prepare("SELECT * FROM track_flights WHERE track_id = ?").bind(t.id).all();
+      if (!t.initialized) message = initialFlightsMessage(t, byDate);
+      else {
+        const changes = flightChanges(t, byDate, frows);
+        if (changes.length) message = flightChangeMessage(t, changes);
+      }
+      extra.push(...flightRowStatements(env, t, byDate));
+    } else if (!t.initialized) {
       message = initialMessage(t, best);
     } else {
       const changes = [];
@@ -758,11 +909,12 @@ async function apiResults(env, body) {
         `INSERT INTO track_prices (track_id, date, price, time, flight, route) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(track_id, date) DO UPDATE SET price = excluded.price, time = excluded.time, flight = excluded.flight, route = excluded.route`,
       ).bind(t.id, date, b.price, b.time, b.flight, b.route));
+    stmts.push(...extra);
     if (!t.initialized) stmts.push(env.DB.prepare("UPDATE tracks SET initialized = 1 WHERE id = ?").bind(t.id));
     await env.DB.batch(stmts);
 
     if (message) {
-      await send(env, t.chat_id, message);
+      await sendLong(env, t.chat_id, message);
       notified++;
     }
   }
@@ -778,8 +930,15 @@ async function scheduled(env) {
     await deleteTrack(env, t.id);
     await send(env, t.chat_id, `⌛ Takip sona erdi: ${trackTitle(t)} · ${trackDates(t)}`);
   }
+  // Fiyat çekici 15 dakikadan uzun süredir hiç sormadıysa (sunucu kapalı vb.) admin'e bir kez haber ver
+  const lastPoll = Number((await getMeta(env, "last_poll_at")) || 0);
   const active = await env.DB.prepare("SELECT COUNT(*) AS n FROM tracks WHERE date_to >= ?").bind(today).first();
-  if (active.n > 0) await dispatchCheck(env);
+  const silent = lastPoll && Date.now() - lastPoll > 15 * 60000;
+  if (silent && active.n > 0 && !(await getMeta(env, "poll_alert_sent"))) {
+    const admin = await adminId(env);
+    if (admin) await send(env, admin, "⚠️ Fiyat çekici sunucu 15 dakikadır bota bağlanmadı. Sunucu kapalı olabilir.");
+    await setMeta(env, "poll_alert_sent", "1");
+  }
 }
 
 // ---------------------------------------------------------------- giriş noktası
@@ -809,17 +968,26 @@ export default {
 
     if (url.pathname.startsWith("/api/")) {
       if (request.headers.get("Authorization") !== `Bearer ${env.API_SECRET}`) return json({ error: "unauthorized" }, 401);
-      if (url.pathname === "/api/jobs") return json(await apiJobs(env));
+      if (url.pathname === "/api/jobs") {
+        ctx.waitUntil((async () => {
+          await setMeta(env, "last_poll_at", Date.now());
+          if (await getMeta(env, "poll_alert_sent")) {
+            await env.DB.prepare("DELETE FROM meta WHERE key = 'poll_alert_sent'").run();
+            const admin = await adminId(env);
+            if (admin) await send(env, admin, "✅ Fiyat çekici sunucu tekrar bağlandı.");
+          }
+        })());
+        return json(await apiJobs(env));
+      }
       if (url.pathname === "/api/results" && request.method === "POST") return json(await apiResults(env, await request.json()));
       return json({ error: "not found" }, 404);
     }
 
-    // Kurulum: tarayıcıda https://<worker>/setup?key=<API_SECRET> aç
-    if (url.pathname === "/setup") {
-      if (url.searchParams.get("key") !== env.API_SECRET) return new Response("forbidden", { status: 403 });
+    // Kurulum: POST /setup, "Authorization: Bearer <API_SECRET>" başlığıyla (Telegram webhook'unu bağlar)
+    if (url.pathname === "/setup" && request.method === "POST") {
+      if (request.headers.get("Authorization") !== `Bearer ${env.API_SECRET}`) return new Response("forbidden", { status: 403 });
       const hook = await configureWebhook(env, url.origin, true);
-      const gh = env.GH_TOKEN && env.GH_REPO ? "GitHub bağlantısı ayarlı" : "UYARI: GH_TOKEN / GH_REPO eksik";
-      return new Response(`Telegram webhook: ${(await hook.json()).description}\n${gh}\n`);
+      return new Response(`Telegram webhook: ${(await hook.json()).description}\n`);
     }
 
     return new Response("Pegasus Fiyat Takip çalışıyor ✈️", { headers: { "Content-Type": "text/plain; charset=utf-8" } });

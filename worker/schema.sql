@@ -37,3 +37,17 @@ CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- Saat aralıklı takiplerde aralıktaki her uçuşun son görülen fiyatı.
+-- flight_key "_" olan satır: o gün kontrol edildi ama aralıkta uçuş yoktu.
+CREATE TABLE IF NOT EXISTS track_flights (
+  track_id   INTEGER NOT NULL,
+  date       TEXT NOT NULL,
+  flight_key TEXT NOT NULL,   -- "PC2184|SAW-ADB"
+  flight     TEXT,
+  time       TEXT,
+  route      TEXT,
+  price      REAL,
+  direct     INTEGER,
+  PRIMARY KEY (track_id, date, flight_key)
+);
