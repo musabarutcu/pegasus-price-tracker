@@ -12,4 +12,3 @@ database_name = "pegasus-takip"
 database_id = "f14a1566-b845-44a2-a47e-a033db657921"   # kurulum.ps1 doldurur
 
 [vars]
-GH_REPO = "musabarutcu/pegasus-price-tracker"   # kurulum.ps1 doldurur
