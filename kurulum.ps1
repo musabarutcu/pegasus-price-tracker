@@ -1,10 +1,12 @@
-﻿# Pegasus Fiyat Takip - Cloudflare kurulumu
-# Calistirmak icin: powershell -ExecutionPolicy Bypass -File kurulum.ps1
+﻿# Pegasus Fiyat Takip - Cloudflare kurulumu (Telegram botu + veritabanı)
+# Çalıştırmak için: powershell -ExecutionPolicy Bypass -File kurulum.ps1
+# Sonrasında fiyat çekici sunucuyu bağlamak için: bash sunucu/baglan.sh ubuntu@SUNUCU_IP
 
 # wrangler bazen stderr'e uyarı yazar; PowerShell 5.1 bunu hata sanmasın diye "Continue"
 $ErrorActionPreference = "Continue"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Set-Location (Join-Path $PSScriptRoot "worker")
+$utf8 = New-Object System.Text.UTF8Encoding $false
 
 function Adim($t) { Write-Host ""; Write-Host "==> $t" -ForegroundColor Cyan }
 
@@ -33,55 +35,63 @@ if (-not $db) {
 }
 if (-not $db) { throw "D1 veritabanı oluşturulamadı" }
 $toml = $toml -replace 'database_id = "[^"]*"', ('database_id = "' + $db.uuid + '"')
+[System.IO.File]::WriteAllText((Join-Path (Get-Location) "wrangler.toml"), $toml, $utf8)
 Write-Host "Veritabanı: $($db.uuid)"
-[System.IO.File]::WriteAllText((Join-Path (Get-Location) "wrangler.toml"), $toml, (New-Object System.Text.UTF8Encoding $false))
 npx wrangler d1 execute pegasus-takip --remote --file schema.sql -y | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Tablolar oluşturulamadı" }
 
-Adim "GitHub deposu"
-$repo = Read-Host "GitHub deposu (ör. kullaniciadi/pegasus-price-tracker)"
-$repo = $repo.Trim() -replace '^https://github.com/', '' -replace '\.git$', '' -replace '/$', ''
-$toml = $toml -replace 'GH_REPO = "[^"]*"', ('GH_REPO = "' + $repo + '"')
-[System.IO.File]::WriteAllText((Join-Path (Get-Location) "wrangler.toml"), $toml, (New-Object System.Text.UTF8Encoding $false))
-
 Adim "Worker yayınlanıyor"
 $deploy = (npx wrangler deploy 2>&1 | Out-String)
-Write-Host $deploy
 $url = [regex]::Match($deploy, 'https://[a-z0-9.-]+\.workers\.dev').Value
-if (-not $url) { throw "Worker adresi bulunamadı (yukarıdaki çıktıya bakın)" }
+if (-not $url) { Write-Host $deploy; throw "Worker adresi bulunamadı (yukarıdaki çıktıya bakın)" }
+Write-Host "Adres: $url"
 
-Adim "Gizli bilgiler"
-$tgToken = (Read-Host "Telegram bot token (BotFather'dan)").Trim()
-$ghToken = (Read-Host "GitHub token (github_pat_...)").Trim()
-$apiSecret = -join ((1..40) | ForEach-Object { "abcdefghijkmnpqrstuvwxyz23456789"[(Get-Random -Maximum 32)] })
-$code = Read-Host "Arkadaşlarına vereceğin erişim kodu (boş bırakırsan rastgele üretilir)"
-if (-not $code.Trim()) { $code = -join ((1..6) | ForEach-Object { "ABCDEFGHJKMNPQRSTUVWXYZ23456789"[(Get-Random -Maximum 31)] }) }
+Adim "Telegram bot token'ı"
+# Token Not Defteri ile alınır (terminale yapıştırmak zor olabiliyor); dosya hemen silinir.
+$form = Join-Path $env:TEMP "pegasus-tokenlar.txt"
+$tgToken = ""; $hata = ""
+while ($true) {
+    $sablon = @(
+        $hata
+        "TELEGRAM= satirinin sonuna BotFather'in verdigi token'in TAMAMINI yapistir (Ctrl+V)."
+        "Rakamlarla baslar ve icinde : vardir. Ornek bicim:  1234567890:AAH...uzun-yazi"
+        "Sonra Ctrl+S ile KAYDET ve bu pencereyi X ile kapat."
+        ""
+        "TELEGRAM=$tgToken"
+    ) -join "`r`n"
+    [System.IO.File]::WriteAllText($form, $sablon.TrimStart(), $utf8)
+    Write-Host "Not Defteri açıldı: token'ı yapıştır, Ctrl+S ile kaydet, pencereyi kapat." -ForegroundColor Cyan
+    Start-Process notepad.exe -ArgumentList ('"' + $form + '"') -Wait
+    $tgToken = [regex]::Match([System.IO.File]::ReadAllText($form), '(?m)^\s*TELEGRAM\s*=[ \t]*([^\s]*)').Groups[1].Value
+    if ($tgToken -match '^\d{5,}:[\w-]{30,}$') { break }
+    $hata = "!!! DUZELTMEN GEREKEN: Telegram token'i bos ya da eksik (basinda rakamlar ve : olmali; Ctrl+S ile kaydetmeyi unutma).`r`n"
+    Write-Host "Telegram token'ı hatalı görünüyor, tekrar dene." -ForegroundColor Red
+}
+[System.IO.File]::Delete($form)
+
+$code = -join ((1..6) | ForEach-Object { "ABCDEFGHJKMNPQRSTUVWXYZ23456789"[(Get-Random -Maximum 31)] })
+$apiSecret = -join ((1..48) | ForEach-Object { "abcdef0123456789"[(Get-Random -Maximum 16)] })
 
 $tmp = Join-Path $env:TEMP ("pegasus-takip-" + [guid]::NewGuid() + ".json")
 try {
-    @{ TELEGRAM_TOKEN = $tgToken; GH_TOKEN = $ghToken; API_SECRET = $apiSecret; ACCESS_CODE = $code.Trim() } |
-        ConvertTo-Json | ForEach-Object { [System.IO.File]::WriteAllText($tmp, $_, (New-Object System.Text.UTF8Encoding $false)) }
-    npx wrangler secret bulk $tmp | Out-Host
+    $json = @{ TELEGRAM_TOKEN = $tgToken; ACCESS_CODE = $code; API_SECRET = $apiSecret } | ConvertTo-Json
+    [System.IO.File]::WriteAllText($tmp, $json, $utf8)
+    npx wrangler secret bulk $tmp | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Gizli bilgiler kaydedilemedi" }
 } finally {
-    Remove-Item $tmp -Force
+    if (Test-Path $tmp) { [System.IO.File]::Delete($tmp) }
 }
 
 Adim "Telegram bağlantısı"
 Start-Sleep -Seconds 5
-Write-Host (Invoke-RestMethod "$url/setup?key=$apiSecret")
+Write-Host (Invoke-RestMethod -Method Post -Uri "$url/setup" -Headers @{ Authorization = "Bearer $apiSecret" })
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
-Write-Host " Cloudflare tarafı hazır!" -ForegroundColor Green
+Write-Host " Bot hazır!" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "Şimdi GitHub'da depo > Settings > Secrets and variables > Actions >"
-Write-Host "'New repository secret' ile şu ikisini ekle:"
+Write-Host "  Arkadaşların için erişim kodu:  /kod $code" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "  WORKER_URL  = $url" -ForegroundColor Yellow
-Write-Host "  API_SECRET  = $apiSecret" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "Arkadaşlarının bota ilk mesajda göndereceği kod:  /kod $code" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "Sonra Telegram'da botuna /start yaz (ilk yazan sen ol, admin sen olursun)."
+Write-Host "Sıradaki adım: fiyat çekici sunucuyu bağla (README > Kurulum > 3. adım):"
+Write-Host "  bash sunucu/baglan.sh ubuntu@SUNUCU_IP" -ForegroundColor Yellow

@@ -1,6 +1,6 @@
 # ✈️ Pegasus Fiyat Takip
 
-Telegram botuna rota ve tarih aralığı yazıyorsun, bot ilk fiyatları hemen gönderiyor, sonra **30 dakikada bir** Pegasus'u kontrol edip **fiyat değişince** (ya da belirlediğin **hedef fiyatın altına inince**) haber veriyor. Tamamen ücretsiz ve 7/24 çalışır.
+Telegram botuna rota ve tarih aralığı yazıyorsun, bot ilk fiyatları **~1 dakikada** gönderiyor, sonra **30 dakikada bir** kontrol edip **fiyat değişince** (ya da belirlediğin **hedef fiyatın altına inince**) haber veriyor. Ücretsiz ve 7/24 çalışır.
 
 ```
 /takip istanbul izmir 20.11 25.11        → fiyat her değiştiğinde bildir
@@ -12,65 +12,50 @@ Telegram botuna rota ve tarih aralığı yazıyorsun, bot ilk fiyatları hemen g
 ## Nasıl çalışıyor?
 
 ```
- Telegram ──► Cloudflare Worker (ücretsiz)  ──tetikler──►  GitHub Actions (ücretsiz)
-   ▲           • komutları anında cevaplar                  • gerçek Chrome açar
-   │           • takipleri D1 veritabanında tutar           • Pegasus fiyatlarını çeker
-   │           • 30 dk'da bir kontrolü başlatır              │
-   └─bildirim─ • fiyatları karşılaştırır  ◄───fiyatlar───────┘
+ Telegram ──► Cloudflare Worker (ücretsiz)        ◄──her dakika sorar──  Oracle sunucu (Always Free)
+   ▲           • komutları anında cevaplar                                • obilet.com'dan Pegasus
+   │           • takipleri D1 veritabanında tutar                           fiyatlarını çeker
+   │           • "kontrol zamanı mı?" der (yeni takip / 30 dk)  ──işler──►  │
+   └─bildirim─ • fiyatları karşılaştırır             ◄──fiyatlar──────────┘
 ```
 
-Pegasus'un sitesi bot korumalı (Akamai); düz istekler engelleniyor. Bu yüzden fiyatlar GitHub'ın sunucusunda sanal ekranda açılan gerçek bir Chrome ile çekiliyor.
+**Fiyatlar neden obilet'ten?** Pegasus'un kendi sitesi Akamai bot korumasıyla bulut sunucularını (GitHub, Oracle...) tamamen engelliyor; sadece ev internetinden açılıyor. obilet ise Pegasus'tan canlı fiyat alıyor ve sunucudan erişilebiliyor. obilet her uçuş için **Pegasus'un kendi fiyatını** ayrıca veriyor (obilet hizmet bedeli hariç); test ettiğimizde Pegasus sitesindeki fiyatla birebir aynıydı. Bot da bu fiyatı gösterir.
 
 **Arkadaşların için kurulum yok:** Botun kullanıcı adını ve erişim kodunu ver, Telegram'da bota `/kod KOD` yazsınlar, o kadar.
 
 ---
 
-## Kurulum (bir kere, ~15 dakika)
+## Kurulum (bir kere)
 
-Gerekenler: GitHub hesabı, Cloudflare hesabı (ücretsiz, kredi kartı istemez), Telegram, bilgisayarda [Node.js](https://nodejs.org) ve Git.
+Gerekenler: Cloudflare hesabı (ücretsiz), Oracle Cloud hesabı (Always Free; kart doğrulaması ister, ücret çekmez), Telegram, bilgisayarda [Node.js](https://nodejs.org), Git ve Git Bash.
 
 ### 1. Telegram botu oluştur
 1. Telegram'da **@BotFather**'a `/newbot` yaz.
 2. Bir isim ve sonu `bot` ile biten kullanıcı adı seç.
-3. Verdiği **token**'ı bir kenara not et (kimseyle paylaşma).
+3. Verdiği **token**'ı kimseyle paylaşma; kurulum betiği Not Defteri açıp isteyecek.
 
-### 2. GitHub deposunu oluştur ve kodu yükle
-1. github.com → **New repository** → ad: `pegasus-price-tracker`, **Public** seç (public depolarda Actions dakikaları sınırsız ve ücretsiz; depoda hiçbir gizli bilgi yok), README ekleme → **Create**.
-2. Bu klasörde terminal aç:
-   ```bash
-   git remote add origin https://github.com/KULLANICI_ADIN/pegasus-price-tracker.git
-   git push -u origin main
-   ```
-
-### 3. GitHub token oluştur (Worker'ın kontrolü başlatabilmesi için)
-1. github.com → sağ üst profil → **Settings** → en altta **Developer settings** → **Personal access tokens** → **Fine-grained tokens** → **Generate new token**.
-2. Ad: `pegasus-takip`, süre: istediğin kadar (en fazla 1 yıl; bitince yenilemen gerekir).
-3. **Repository access** → *Only select repositories* → `pegasus-price-tracker`.
-4. **Permissions** → Repository permissions → **Actions: Read and write**.
-5. **Generate token** → `github_pat_...` ile başlayan token'ı not et.
-
-### 4. Cloudflare hesabı aç
-[dash.cloudflare.com/sign-up](https://dash.cloudflare.com/sign-up) — ücretsiz plan yeterli.
-
-### 5. Kurulum betiğini çalıştır
-Bu klasörde PowerShell aç:
+### 2. Botu Cloudflare'e kur
+Cloudflare hesabı aç ([dash.cloudflare.com/sign-up](https://dash.cloudflare.com/sign-up)), sonra bu klasörde PowerShell'de:
 ```powershell
 powershell -ExecutionPolicy Bypass -File kurulum.ps1
 ```
-Betik sırasıyla: Cloudflare'e giriş yaptırır (tarayıcı açılır), veritabanını oluşturur, Worker'ı yayınlar, senden GitHub depo adını, Telegram token'ını ve GitHub token'ını ister, Telegram'ı bağlar. Sonunda ekrana **WORKER_URL**, **API_SECRET** ve arkadaşlar için **erişim kodu** yazar.
+Betik Cloudflare'e giriş yaptırır, veritabanını oluşturur, botu yayınlar, Telegram token'ını Not Defteri ile ister ve Telegram'ı bağlar. Sonunda arkadaşlar için **erişim kodunu** yazar.
 
-### 6. GitHub'a iki gizli değişken ekle
-Depo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
+### 3. Fiyat çekici sunucuyu kur (Oracle Always Free)
+1. Oracle Cloud'da bir sunucu aç: **Ubuntu 24.04**, şekil **VM.Standard.A1.Flex** (1 OCPU / 6 GB yeter), genel IP'li, SSH anahtarı olarak `~/.ssh/pegasus_oracle.pub` (yoksa `ssh-keygen -t ed25519 -f ~/.ssh/pegasus_oracle`).
+   "Out of capacity" hatasında başka bir *Availability domain* dene. Genel IP verilmezse sunucu açılınca VNIC → *IP administration* → *Edit* → *Ephemeral public IP*.
+2. Kodu sunucuya indir ve kur (Git Bash'te):
+   ```bash
+   ssh -i ~/.ssh/pegasus_oracle ubuntu@SUNUCU_IP "git clone https://github.com/KULLANICI_ADIN/pegasus-price-tracker.git pegasus-takip"
+   bash sunucu/baglan.sh ubuntu@SUNUCU_IP
+   ssh -i ~/.ssh/pegasus_oracle ubuntu@SUNUCU_IP "bash ~/pegasus-takip/sunucu/kur.sh"
+   ```
+   `baglan.sh` yeni bir ortak şifre üretip bota ve sunucuya yazar (ekrana basmaz). `kur.sh` her dakika çalışan zamanlayıcıyı kurar.
 
-| Ad | Değer |
-|---|---|
-| `WORKER_URL` | betiğin yazdığı adres (`https://pegasus-takip....workers.dev`) |
-| `API_SECRET` | betiğin yazdığı şifre |
-
-### 7. Dene
+### 4. Dene
 1. Telegram'da botuna **`/start`** yaz — bota ilk yazan kişi admin olur (hata uyarıları sana gelir).
-2. `/takip istanbul izmir 20.11 25.11` yaz.
-3. 1-2 dakika içinde ilk fiyat listesi gelmeli. Gelmezse GitHub'da **Actions** sekmesinden "Fiyat kontrol" çalışmasının loguna bak.
+2. `/takip istanbul izmir 20.11 25.11` yaz. ~1 dakika içinde ilk fiyat listesi gelir.
+3. Sorun olursa bota **`/durum`** yaz (sadece admin): son kontrolün sonucunu ve hataları gösterir.
 
 ---
 
@@ -94,7 +79,7 @@ Sona bir sayı ekle:
 Sadece fiyat **1.400 TL veya altına** inince bildirim gelir (altındayken daha da düşerse yine haber verir).
 
 ### 3. Saat aralığı
-Sadece belli saatler arasında **kalkan** uçuşlara bakmak için:
+Sadece belli saatler arasında **kalkan** uçuşlara bakmak için. Saat aralığı girilince aralıktaki **her uçuş ayrı ayrı** takip edilir: ilk mesajda gün gün tüm uçuşlar listelenir, sonra herhangi bir uçuşun fiyatı değişince (ya da hedefin altına inince), yeni uçuş satışa açılınca veya bir uçuş satıştan kalkınca bildirim gelir. (Saat aralığı girilmezse her günün en ucuz uçuşu takip edilir.)
 ```
 /takip istanbul izmir 20.11 25.11 saat 08-12
 ```
@@ -149,27 +134,29 @@ Listede **🗑 Hepsini iptal et** butonu da var (yanlışlıkla basmaya karşı 
 
 ## Sorun giderme
 
-- **İlk fiyatlar gelmiyor:** GitHub → Actions → son "Fiyat kontrol" çalışmasına bak. `403` hataları Pegasus'un GitHub sunucularını engellediği anlamına gelir (aşağıya bak).
-- **Bot cevap vermiyor:** Tarayıcıda `WORKER_URL/setup?key=API_SECRET` adresini aç; Telegram bağlantısını yeniler.
-- **3 kontrol üst üste başarısız olursa** admin'e (sana) Telegram'dan uyarı gelir.
-- **GitHub token'ının süresi dolunca** yeni token oluşturup `cd worker` → `npx wrangler secret put GH_TOKEN` ile güncelle.
+- **`/durum`** (sadece admin): son kontrol zamanı, sonucu ve varsa hatalar.
+- **Sunucu logları:** `ssh -i ~/.ssh/pegasus_oracle ubuntu@SUNUCU_IP "journalctl -u pegasus-takip -n 50 -o cat"`
+- **3 kontrol üst üste başarısız olursa** ya da **sunucu 15 dakika bota bağlanmazsa** admin'e Telegram'dan uyarı gelir.
+- **Bot cevap vermiyor:** `bash sunucu/baglan.sh ubuntu@SUNUCU_IP` Telegram bağlantısını ve sunucu şifresini yeniler.
+- **Kodu güncelledikten sonra:** `cd worker && npx wrangler deploy` (bot) ve sunucuda `git -C ~/pegasus-takip pull` (çekici).
 
-### Pegasus GitHub'ı engellerse: kendi bilgisayarında çalıştır
-Worker ve bot aynen çalışmaya devam eder; sadece fiyat çekme işini bilgisayarın yapar (bilgisayar açıkken):
+### Pegasus'un kendi sitesinden çekmek (sadece ev internetinde)
+`checker/scraper.py` Pegasus sitesini gerçek Chrome ile okur; ev internetinde çalışır, bulut sunucularda Akamai engeller. Kendi bilgisayarında denemek için:
 ```powershell
 cd checker
-pip install -r requirements.txt
-$env:WORKER_URL="https://pegasus-takip....workers.dev"; $env:API_SECRET="..."
-python check.py --loop 30
+pip install curl_cffi patchright
+$env:SOURCE="pegasus"; $env:WORKER_URL="https://pegasus-takip....workers.dev"; $env:API_SECRET="..."
+python check.py --loop 1
 ```
 
 ## Dosyalar
 
 - `worker/src/index.js` — Telegram botu, veritabanı, bildirim mantığı (Cloudflare Worker)
-- `worker/schema.sql` — veritabanı tabloları
-- `checker/scraper.py` — Pegasus fiyatlarını gerçek Chrome ile çeker
-- `checker/check.py` — bir kontrol turu (Worker'dan işi al → fiyatları çek → sonucu gönder)
-- `.github/workflows/check.yml` — GitHub Actions görevi
+- `worker/schema.sql`, `worker/migrations/` — veritabanı tabloları
+- `checker/obilet.py` — Pegasus fiyatlarını obilet'ten çeker (varsayılan kaynak)
+- `checker/scraper.py` — Pegasus sitesinden gerçek Chrome ile çeker (sadece ev internetinde)
+- `checker/check.py` — bir kontrol turu (Worker'a sor → fiyatları çek → sonucu gönder)
+- `sunucu/` — Oracle sunucu kurulumu: systemd servis + zamanlayıcı, `kur.sh`, `baglan.sh`
 - `kurulum.ps1` — Cloudflare kurulum betiği
 
-> Kişisel kullanım içindir. Pegasus sitesini değiştirirse fiyat çekme kısmının güncellenmesi gerekebilir.
+> Kişisel kullanım içindir. obilet ya da Pegasus sitelerini değiştirirse fiyat çekme kısmının güncellenmesi gerekebilir.
